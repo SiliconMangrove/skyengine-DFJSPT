@@ -145,26 +145,49 @@ class JointPolicy(nn.Module):
         self.plan_head = nn.Sequential(nn.Linear(hidden_dim * 3 + 8, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, 1))
         self.value_head = nn.Linear(hidden_dim, 1)
 
-    def encode(self, graph: dict, history: torch.Tensor | None) -> tuple[dict, torch.Tensor]:
+    def _encode_nodes(self, graph: dict) -> dict[str, torch.Tensor]:
         device = next(self.parameters()).device
         nodes = {name: self.encoders[name](values.to(device)) for name, values in graph["nodes"].items()}
-        for _ in range(3):
-            messages = {name: torch.zeros_like(value) for name, value in nodes.items()}
+        edges: dict[str, torch.Tensor] = {name: value.to(device) for name, value in graph["edges"].items()}
+        attributes: dict[str, torch.Tensor] = {name: value.to(device) for name, value in graph["edge_features"].items()}
+        if "degrees" in graph:
+            counts: dict[str, torch.Tensor] = graph["degrees"]
+        else:
             counts = {name: value.new_zeros((len(value), 1)) for name, value in nodes.items()}
             for name, (source, target) in RELATIONS.items():
-                edge = graph["edges"][name].to(device)
-                attrs = graph["edge_features"][name].to(device)
+                edge: torch.Tensor = edges[name]
+                counts[target].index_add_(0, edge[1], nodes[target].new_ones((edge.shape[1], 1)))
+                counts[source].index_add_(0, edge[0], nodes[source].new_ones((edge.shape[1], 1)))
+        counts = {name: value.clamp_min(1) for name, value in counts.items()}
+        for _ in range(3):
+            messages = {name: torch.zeros_like(value) for name, value in nodes.items()}
+            for name, (source, target) in RELATIONS.items():
+                edge = edges[name]
+                attrs = attributes[name]
                 if not edge.shape[1]:
                     continue
                 messages[target].index_add_(0, edge[1], self.messages[name](torch.cat([nodes[source][edge[0]], attrs], -1)))
                 messages[source].index_add_(0, edge[0], self.reverse[name](torch.cat([nodes[target][edge[1]], attrs], -1)))
-                counts[target].index_add_(0, edge[1], attrs.new_ones((edge.shape[1], 1)))
-                counts[source].index_add_(0, edge[0], attrs.new_ones((edge.shape[1], 1)))
-            nodes = {name: self.updates[name](messages[name] / counts[name].clamp_min(1), value) for name, value in nodes.items()}
+            nodes = {name: self.updates[name](messages[name] / counts[name], value) for name, value in nodes.items()}
+        return nodes
+
+    def encode_graphs(self, graph: dict) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+        """Encode disjoint graphs together, without mixing nodes or pooling across graphs."""
+        nodes: dict[str, torch.Tensor] = self._encode_nodes(graph)
+        pooled: list[torch.Tensor] = []
+        for name, values in nodes.items():
+            sums: torch.Tensor = values.new_zeros((graph["count"], self.hidden_dim))
+            sums.index_add_(0, graph["graph_ids"][name], values)
+            counts: torch.Tensor = graph["node_counts"][name]
+            pooled.append(torch.cat([sums / counts.clamp_min(1), counts.log1p()], dim=1))
+        return nodes, self.global_encoder(torch.cat(pooled, dim=1))
+
+    def encode(self, graph: dict, history: torch.Tensor | None) -> tuple[dict, torch.Tensor]:
+        nodes: dict[str, torch.Tensor] = self._encode_nodes(graph)
         pooled = torch.cat([torch.cat([value.mean(0) if len(value) else value.new_zeros(self.hidden_dim),
                                        value.new_tensor([math.log1p(len(value))])]) for value in nodes.values()])
         encoded = self.global_encoder(pooled)
-        previous = torch.zeros_like(encoded) if history is None else history.to(device)
+        previous = torch.zeros_like(encoded) if history is None else history.to(encoded.device)
         context = self.history_gru(encoded.unsqueeze(0), previous.unsqueeze(0)).squeeze(0)
         return nodes, context
 

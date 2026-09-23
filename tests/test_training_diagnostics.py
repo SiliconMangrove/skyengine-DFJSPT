@@ -6,19 +6,24 @@ from types import SimpleNamespace
 import torch
 
 from dfjsp_t_rl.trainer import CTDEPPOTrainer
+from dfjsp_t_rl.policy import DEFAULT_NODE_DIMS, RELATIONS
 from experiment.rl_platform.api import Trajectory, Transition
 
 
 class TinyPolicyModel(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
+        self.hidden_dim: int = 1
         self.logit = torch.nn.Parameter(torch.tensor(math.log(3.0)))
 
-    def encode(self, graph, history):
-        return {}, torch.zeros(1)
+    def encode_graphs(self, graph):
+        return {}, torch.zeros(graph["count"], 1)
 
-    def forward(self, graph, candidates, history):
-        return {"history": torch.zeros(1)}
+    def history_gru(self, encoded, history):
+        return torch.zeros_like(history)
+
+    def decode(self, nodes, context, candidates):
+        return {"history": context}
 
     def statistics(self, output, candidates, scope, selected):
         distribution = torch.distributions.Categorical(logits=torch.stack([self.logit, self.logit * 0]))
@@ -29,7 +34,10 @@ def trajectory(old_probability: float, rewards: list[float], values: list[float]
     transitions: list[Transition] = []
     for index, (reward, value) in enumerate(zip(rewards, values)):
         sample: dict = {"old_log_prob": math.log(old_probability), "old_value": value,
-                       "graph": {}, "candidates": {}, "scope": 0, "selected": 0}
+                       "graph": {"nodes": {name: torch.empty(0, dim) for name, dim in DEFAULT_NODE_DIMS.items()},
+                                 "edges": {name: torch.empty(2, 0, dtype=torch.long) for name in RELATIONS},
+                                 "edge_features": {name: torch.empty(0, 4) for name in RELATIONS}},
+                       "candidates": {}, "scope": 0, "selected": 0}
         transitions.append(Transition(None, None, reward, None, index == len(rewards) - 1, False,
                                       {"delta_t": 1.0, "_policy": sample}))
     return Trajectory(transitions, metadata={"bootstrap_value": 0.0})
