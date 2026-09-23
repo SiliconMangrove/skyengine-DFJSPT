@@ -1,0 +1,44 @@
+{
+  "dataset": {
+    "path": "dataset/dfjsp_t_train/train.jsonl"
+  },
+  "environment": {
+    "max_steps": 1000,
+    "backend": "formal_headless",
+    "num_envs": 4
+  },
+  "policy": {
+    "target": "dfjsp_t_rl.policy.DFJSPTPolicyPlugin",
+    "kwargs": {
+      "hidden_dim": 128,
+      "device": "cpu",
+      "candidate_limit": 24,
+      "scenario_count": 8,
+      "search_seconds": 0.0,
+      "routing_horizon": 24,
+      "decision_interval": 5,
+      "inference_budget_ms": 300.0
+    }
+  },
+  "reward": {
+    "target": "dfjsp_t_rl.reward.SMDPMakespanReward",
+    "kwargs": {
+      "horizon": 1000,
+      "shaping_scale": 0.1
+    }
+  },
+  "trainer": {
+    "target": "dfjsp_t_rl.trainer.CTDEPPOTrainer"
+  },
+  "training": {
+    "episodes": 1000,
+    "learning_rate": 0.0003,
+    "gamma": 1.0,
+    "gae_lambda": 0.95,
+    "clip_ratio": 0.2,
+    "epochs": 4,
+    "value_coef": 0.5,
+    "entropy_coef": 0.01,
+    "sequence_length": 32
+  }
+}
