@@ -4,7 +4,7 @@ from .reward import SMDPMakespanReward
 from .trainer import CTDEPPOTrainer
 
 ALGORITHM_METADATA = {
-    "name": "DFJSP-T graph rolling PPO", "version": "0.2.0",
+    "name": "DFJSP-T graph rolling PPO", "version": "0.3.0",
     "observation_schema": 2, "action_schema": 2, "backends": ["formal_headless"],
     "policy": "dfjsp_t_rl.policy:DFJSPTPolicyPlugin",
     "reward": "dfjsp_t_rl.reward:SMDPMakespanReward", "trainer": "dfjsp_t_rl.trainer:CTDEPPOTrainer",

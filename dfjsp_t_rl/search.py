@@ -8,6 +8,7 @@ from bisect import bisect_right
 
 from .belief import DurationBelief
 from .traffic import RollingTrafficPlanner, TrafficPlan
+from experiment.algorithm_platform_plugins.dfjsp_t.buffer_safety import admission_state, buffer_claims, safe_to_admit
 
 
 @dataclass
@@ -25,6 +26,13 @@ class Candidate:
     samples: list[float] = field(default_factory=list)
     route_order: list[int] | None = None
     evacuation: bool = False
+
+    def identity(self) -> tuple:
+        """Physical transaction identity; search scope is not a second action."""
+        return (tuple(sorted(self.dispatch.items())),
+                tuple(sorted((aid, task["job_id"], task["op_id"]) for aid, task in self.assignments.items())),
+                tuple(sorted(self.cancel)), tuple(sorted(self.release)),
+                tuple(sorted((mid, tuple(keys)) for mid, keys in self.queues.items())))
 
     def action(self, scene: dict) -> dict:
         machines = {m["id"]: m for m in scene["machines"]}
@@ -69,8 +77,10 @@ class CandidateSearch:
         agents = {a["id"]: a for a in scene["agents"]}
         held_jobs = {m["current_op"][0] for m in machines.values() if m["current_op"] is not None}
         if scope >= 2:
+            # An accepted transport owns its vehicle until delivery or failure.
+            # Reoptimizing a healthy pickup must not reset handling indefinitely.
             candidate.release = {a["id"] for a in agents.values() if a["current_task"] is not None and not a["loaded"]
-                                 and (scope == 4 or a["id"] in affected["agents"] or a["current_task"]["job_id"] in affected["jobs"])}
+                                 and a["status"] != "OK"}
         loaded = {(a["current_task"]["job_id"], a["current_task"]["op_id"]) for a in agents.values() if a["loaded"]}
         preserve_queue = {tuple(key) for machine in machines.values() for key in machine["input_queue"]
                           if machine["status"] == "OK" and variant % 3 == 1}
@@ -79,9 +89,12 @@ class CandidateSearch:
                                 if op["status"] == "PENDING" and op["assigned_machine"] is not None
                                 and (j["job_id"], op["op_id"]) not in loaded
                                 and (j["job_id"], op["op_id"]) not in preserve_queue
-                                and (scope == 4 or j["job_id"] in affected["jobs"] or op["assigned_machine"] in affected["machines"])}
+                                and machines[op["assigned_machine"]]["status"] != "OK"}
             candidate.release.update(a["id"] for a in agents.values() if a["current_task"] is not None
                                      and (a["current_task"]["job_id"], a["current_task"]["op_id"]) in candidate.cancel)
+        proposed: dict = admission_state(scene, candidate.cancel)
+        jobs = {j["job_id"]: j for j in proposed["jobs"]}
+        claims: dict[int, set[int]] = buffer_claims(proposed)
         operations: list = [(j, op) for j in jobs.values() for i, op in enumerate(j["ops"])
                             if op["status"] == "PENDING" and (i == 0 or j["ops"][i - 1]["status"] == "FINISHED")
                             and (op["assigned_machine"] is None or (j["job_id"], op["op_id"]) in candidate.cancel)
@@ -94,11 +107,12 @@ class CandidateSearch:
             key = (job["job_id"], op["op_id"])
             options = [(self.belief.process_summary(op, mid)[0] + self.router.distance(job["material_location"], machines[mid]["location"])
                         + reservations[mid] * duration, mid) for mid, duration in op["machine_options_with_time"]
-                       if machines[mid]["status"] == "OK"]
+                       if machines[mid]["status"] == "OK"
+                       and safe_to_admit(proposed, claims, key[0], key[1], mid)]
             options.sort()
             if not options or not math.isfinite(options[0][0]):
                 continue
-            if parent is not None and key in parent.dispatch:
+            if parent is not None and parent.dispatch.get(key) in {mid for _, mid in options}:
                 chosen = parent.dispatch[key]
                 if index == variant % max(1, len(operations)):
                     alternatives = [mid for _, mid in options if mid != chosen]
@@ -106,6 +120,8 @@ class CandidateSearch:
             else:
                 chosen = options[(variant // 2 + index) % min(len(options), 2)][1]
             candidate.dispatch[key] = chosen
+            claims[chosen].add(key[0])
+            op["assigned_machine"] = chosen
             reservations[chosen] += 1
         tasks = {t["task_id"]: deepcopy(t) for t in scene["tasks"]
                  if (t["job_id"], t["op_id"]) not in candidate.cancel
@@ -341,19 +357,9 @@ class CandidateSearch:
         yield self._accepted(candidates, affected["hard"])
 
     def _accepted(self, candidates: list[Candidate], hard: bool) -> list[Candidate]:
-        # Every published prefix has paired evidence against its KEEP reference.
-        reference = min((c for c in candidates if c.scope == 0), key=lambda c: c.cost)
-        if hard:
-            return list(candidates)
-        accepted: list[Candidate] = []
+        # Modelled completion time is an input to the actor, not an oracle that
+        # vetoes its exploration. Deduplicate equivalent physical transactions.
+        unique: dict[tuple, Candidate] = {}
         for candidate in candidates:
-            if candidate.scope == 0 or not math.isfinite(reference.cost):
-                accepted.append(candidate)
-                continue
-            differences = [before - after for before, after in zip(reference.samples, candidate.samples)]
-            improvement = sum(differences) / len(differences)
-            variance = sum((d - improvement) ** 2 for d in differences) / max(1, len(differences) - 1)
-            margin = 1.64 * math.sqrt(variance / len(differences))
-            if improvement > margin + 1e-6 or (candidate.scope == 1 and improvement >= -1e-6):
-                accepted.append(candidate)
-        return accepted
+            unique.setdefault(candidate.identity(), candidate)
+        return list(unique.values())

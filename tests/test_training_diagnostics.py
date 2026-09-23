@@ -25,7 +25,7 @@ class TinyPolicyModel(torch.nn.Module):
     def decode(self, nodes, context, candidates):
         return {"history": context}
 
-    def statistics(self, output, candidates, scope, selected):
+    def statistics(self, output, candidates, selected):
         distribution = torch.distributions.Categorical(logits=torch.stack([self.logit, self.logit * 0]))
         return distribution.log_prob(torch.tensor(0)), self.logit * 0, distribution.entropy()
 
@@ -37,7 +37,7 @@ def trajectory(old_probability: float, rewards: list[float], values: list[float]
                        "graph": {"nodes": {name: torch.empty(0, dim) for name, dim in DEFAULT_NODE_DIMS.items()},
                                  "edges": {name: torch.empty(2, 0, dtype=torch.long) for name in RELATIONS},
                                  "edge_features": {name: torch.empty(0, 4) for name in RELATIONS}},
-                       "candidates": {}, "scope": 0, "selected": 0}
+                       "candidates": {}, "selected": 0}
         transitions.append(Transition(None, None, reward, None, index == len(rewards) - 1, False,
                                       {"delta_t": 1.0, "_policy": sample}))
     return Trajectory(transitions, metadata={"bootstrap_value": 0.0})

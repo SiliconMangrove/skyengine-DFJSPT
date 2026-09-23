@@ -12,7 +12,8 @@ from torch.distributions import Categorical
 from .belief import DurationBelief
 from .search import CandidateSearch, Candidate
 from .traffic import RollingTrafficPlanner, TrafficPlan
-from .realtime import PlanningJob, applicable, materialize, route_moves
+from .realtime import PlanningJob, applicable, materialize
+from experiment.algorithm_platform_plugins.dfjsp_t.pibt import PIBTRouter
 
 DEFAULT_NODE_DIMS: dict[str, int] = {"jobs": 8, "operations": 8, "machines": 8, "agvs": 10, "roads": 6}
 RELATIONS: dict[str, tuple[str, str]] = {
@@ -139,7 +140,6 @@ class JointPolicy(nn.Module):
         self.updates = nn.ModuleDict({name: nn.GRUCell(hidden_dim, hidden_dim) for name in DEFAULT_NODE_DIMS})
         self.global_encoder = nn.Sequential(nn.Linear((hidden_dim + 1) * len(DEFAULT_NODE_DIMS), hidden_dim), nn.SiLU())
         self.history_gru = nn.GRUCell(hidden_dim, hidden_dim)
-        self.scope_head = nn.Linear(hidden_dim, 5)
         self.scope_embedding = nn.Embedding(5, hidden_dim)
         self.joint_token = nn.Sequential(nn.Linear(hidden_dim * 3 + 8, hidden_dim), nn.SiLU())
         self.plan_head = nn.Sequential(nn.Linear(hidden_dim * 3 + 8, hidden_dim), nn.SiLU(), nn.Linear(hidden_dim, 1))
@@ -209,22 +209,12 @@ class JointPolicy(nn.Module):
         counts = torch.bincount(values["owners"], minlength=count).clamp_min(1).unsqueeze(1)
         pooled = pooled / counts
         plan_logits = self.plan_head(torch.cat([pooled, context.expand(count, -1), self.scope_embedding(values["scopes"]), values["summaries"]], -1)).squeeze(-1)
-        # The learned residual ranks plans on top of the scenario completion estimate.
-        plan_logits = plan_logits - values["summaries"][:, 0]
-        scope_mask = torch.bincount(values["scopes"], minlength=5) > 0
-        return {"scope_logits": self.scope_head(context).masked_fill(~scope_mask, -torch.inf),
-                "plan_logits": plan_logits, "value": self.value_head(context).squeeze(), "history": context}
+        return {"plan_logits": plan_logits, "value": self.value_head(context).squeeze(), "history": context}
 
-    def statistics(self, output: dict, candidates: dict, scope: int, selected: int) -> tuple:
-        scope_distribution = Categorical(logits=output["scope_logits"])
-        scopes = candidates["scopes"].to(output["plan_logits"].device)
-        plan_distribution = Categorical(logits=output["plan_logits"].masked_fill(scopes != scope, -torch.inf))
-        log_prob = scope_distribution.log_prob(scopes.new_tensor(scope)) + plan_distribution.log_prob(scopes.new_tensor(selected))
-        entropy = scope_distribution.entropy()
-        for option in torch.unique(scopes):
-            conditional = Categorical(logits=output["plan_logits"].masked_fill(scopes != option, -torch.inf))
-            entropy = entropy + scope_distribution.probs[option] * conditional.entropy()
-        return log_prob, output["value"], entropy
+    def statistics(self, output: dict, candidates: dict, selected: int) -> tuple:
+        distribution = Categorical(logits=output["plan_logits"])
+        index: torch.Tensor = candidates["scopes"].new_tensor(selected, device=output["plan_logits"].device)
+        return distribution.log_prob(index), output["value"], distribution.entropy()
 
 
 class DFJSPTPolicyPlugin:
@@ -241,8 +231,8 @@ class DFJSPTPolicyPlugin:
         payload = None
         if checkpoint:
             payload = torch.load(checkpoint, map_location=device, weights_only=False)
-            if payload["schema_version"] != 3:
-                raise ValueError("candidate-policy architecture requires a version 3 checkpoint")
+            if payload["schema_version"] != 4:
+                raise ValueError("transaction-policy architecture requires a version 4 checkpoint")
             parameters = payload["policy_parameters"]
             hidden_dim = parameters["hidden_dim"]
             candidate_limit, scenario_count = parameters["candidate_limit"], parameters["scenario_count"]
@@ -284,16 +274,14 @@ class DFJSPTPolicyPlugin:
         candidates, scenarios, seconds, horizon, _, production, logistics = self.settings
         self.belief = DurationBelief()
         self.router = RollingTrafficPlanner(horizon)
+        self.search_router = RollingTrafficPlanner(horizon)
+        self.traffic = PIBTRouter(torch.initial_seed())
         self.history: torch.Tensor | None = None
         self.last_action_data = None
         self.last_decision = -10**9
         self.last_reschedule = -10**9
         self.ready_keys: set = set()
         self.pending: PlanningJob | None = None
-        self.route_job: PlanningJob | None = None
-        self.route_cache: tuple[TrafficPlan, dict] | None = None
-        self.route_priority: list[int] | None = None
-        self.route_evacuation = False
         self.last_search = -10**9
         self.last_recovery = -10**9
         self.requested = True
@@ -303,7 +291,7 @@ class DFJSPTPolicyPlugin:
         self.diagnostics: dict = {}
         self.planning_metrics: dict[str, float] = {name: 0.0 for name in ("planning_decisions", "planning_seconds", "planning_max_seconds",
             "inference_steps", "inference_seconds", "inference_max_seconds", "inference_over_budget_steps",
-            "search_slices", "search_completed", "search_invalidated", "route_cache_hits")}
+            "search_slices", "search_completed", "search_invalidated", "routing_steps")}
 
     def state_dict(self) -> dict:
         return {**{f"actor.{key}": value for key, value in self.model.state_dict().items()},
@@ -326,7 +314,7 @@ class DFJSPTPolicyPlugin:
 
     def _search_steps(self, scene: dict, affected: dict):
         # Beliefs and common random numbers stay frozen for the planning epoch.
-        search = CandidateSearch(self.router, deepcopy(self.belief), *self.settings[:3],
+        search = CandidateSearch(self.search_router, deepcopy(self.belief), *self.settings[:3],
                                  self.settings[5], self.settings[6], self.decision_interval)
         encoded = None
         history = self.history
@@ -336,7 +324,7 @@ class DFJSPTPolicyPlugin:
         def ranker(plans: list[Candidate]):
             nonlocal encoded, ranked_count
             if encoded is None:
-                graph, lookup = graph_observation(scene, search.belief, self.router)
+                graph, lookup = graph_observation(scene, search.belief, search.router)
                 yield None
                 nodes, context = self.proposal_model.encode(graph, history)
                 yield None
@@ -344,7 +332,7 @@ class DFJSPTPolicyPlugin:
             nodes, context, lookup = encoded
             new: list[Candidate] = plans[ranked_count:]
             if new:
-                tokens: dict = candidate_tensors(scene, new, lookup, search.belief, self.router)
+                tokens: dict = candidate_tensors(scene, new, lookup, search.belief, search.router)
                 yield None
                 scores.extend(self.proposal_model.decode(nodes, context, tokens)["plan_logits"].tolist())
                 yield None
@@ -357,19 +345,9 @@ class DFJSPTPolicyPlugin:
         graph, lookup = graph_observation(scene, self.belief, self.router)
         candidates = candidate_tensors(scene, plans, lookup, self.belief, self.router)
         output = self.model(graph, candidates, self.history)
-        scopes = candidates["scopes"].to(output["scope_logits"].device)
-        if deterministic:
-            scores = output["plan_logits"].clone()
-            for option in torch.unique(scopes):
-                mask = scopes == option
-                scores[mask] = torch.log_softmax(output["scope_logits"], 0)[option] + torch.log_softmax(scores[mask], 0)
-            selected = int(scores.argmax())
-            scope = int(scopes[selected])
-        else:
-            scope = int(Categorical(logits=output["scope_logits"]).sample())
-            selected = int(Categorical(logits=output["plan_logits"].masked_fill(scopes != scope, -torch.inf)).sample())
-        log_prob, value, _ = self.model.statistics(output, candidates, scope, selected)
-        self.last_action_data = {"graph": graph, "candidates": candidates, "scope": scope, "selected": selected,
+        selected: int = int(output["plan_logits"].argmax() if deterministic else Categorical(logits=output["plan_logits"]).sample())
+        log_prob, value, _ = self.model.statistics(output, candidates, selected)
+        self.last_action_data = {"graph": graph, "candidates": candidates, "selected": selected,
                                  "history": None if self.history is None else self.history.detach().cpu(),
                                  "old_log_prob": float(log_prob), "old_value": float(value)}
         self.history = output["history"].detach()
@@ -414,34 +392,10 @@ class DFJSPTPolicyPlugin:
             if self.pending is not None:
                 self.planning_metrics["search_invalidated"] += 1
             self.pending = None
-            self.route_cache = None
-            self.route_job = None
-            self.route_evacuation = True
 
-        # Driving has priority. A partly computed route cannot overwrite the
-        # last executable reservation; a changed world invalidates its suffix.
-        moves = None if self.route_cache is None else route_moves(*self.route_cache, scene)
-        if moves is not None:
-            self.planning_metrics["route_cache_hits"] += 1
-        else:
-            self.route_cache = None
-            if self.route_job is None or self.route_job.scene["grid"] != scene["grid"]:
-                self.route_job = PlanningJob(self.router.plan_steps(scene, {}, set(), self.route_priority,
-                                            self.route_evacuation or scene["time"] <= self.recovery_until), scene, route=True)
-            self.route_job.advance(started + self.inference_budget * .20)
-            if self.route_job.done:
-                route = self.route_job.result
-                # Vehicles jointly held while this job was suspended. Start
-                # its reservation clock now rather than skipping unexecuted moves.
-                route_scene = {**self.route_job.scene, "time": scene["time"]}
-                moves = route_moves(route, route_scene, scene)
-                if moves is not None:
-                    self.route_cache = route, route_scene
-                self.route_job = None
-        if moves is None:
-            # An explicit joint HOLD is always executable while reservations
-            # are being computed; do not mix partial routes from two epochs.
-            moves = [0] * len(scene["agents"])
+        # Search proposes scheduling transactions; the traffic executor advances
+        # committed work every tick regardless of proposal age or search progress.
+        moves: list[int] = [0] * len(scene["agents"])
         action = {"job_actions": {"transfer_requests": []}, "assign_actions": {"assignments": {}, "pending_transfers": []},
                   "agent_actions": moves}
         if self.pending is None and (self.requested or scene["time"] - self.last_search >= self.decision_interval):
@@ -468,24 +422,28 @@ class DFJSPTPolicyPlugin:
             self.planning_metrics["search_completed"] += 1
             self.pending = None
         if plans:
+            progressing: bool = any(a["current_task"] is not None for a in scene["agents"]) or any(
+                op["status"] in {"PROCESSING", "SUSPENDED"}
+                for job in scene["jobs"] for op in job["ops"] if op["status"] != "FINISHED")
+            productive: list[Candidate] = [plan for plan in plans if plan.dispatch or plan.assignments]
+            # An idle plant with admissible work has no useful WAIT action.
+            # Waiting remains available while previously committed work advances.
+            if productive and not progressing:
+                plans = productive
             plan = self._choose(scene, plans, deterministic)
             plan.traffic.moves = moves
             action = plan.action(scene)
             changed = bool(plan.dispatch or plan.assignments or plan.cancel or plan.release or plan.queues)
-            if changed or plan.scope != 0:
-                # The transaction commits now. Its new transport goals are
-                # routed on the following tick, including assignment dwell.
-                action["agent_actions"] = [0] * len(scene["agents"])
-                self.route_cache = None
-                self.route_job = None
-                self.route_priority = plan.route_order
-                self.route_evacuation = plan.evacuation
-                # Continue the next improvement from the committed live state.
-                # Other agents' physical steps are never blocked by this search.
+            if changed:
                 self.pending = None
                 self.requested = True
             if plan.cancel or plan.release or plan.queues:
                 self.last_reschedule = scene["time"]
+        assigned: set[int] = set(action["assign_actions"]["assignments"])
+        assigned.update(action.get("reschedule", {}).get("release_agvs", ()))
+        routes: list[dict] = self.traffic.plan(scene, assigned)
+        action["agent_actions"] = [item["path"][0] for item in routes]
+        self.planning_metrics["routing_steps"] += 1
         seconds = time.perf_counter() - started
         self.planning_metrics["inference_steps"] += 1
         self.planning_metrics["inference_seconds"] += seconds
@@ -495,8 +453,7 @@ class DFJSPTPolicyPlugin:
         self.planning_metrics["planning_max_seconds"] = self.planning_metrics["inference_max_seconds"]
         self.diagnostics = {"decision_due": self.last_action_data is not None, "decision_seconds": seconds,
                             "inference_budget_ms": self.inference_budget * 1000, "over_budget": seconds > self.inference_budget,
-                            "search_pending": self.pending is not None, "route_pending": self.route_job is not None,
-                            "route_reused": self.route_cache is not None, "search_completed": self.planning_metrics["search_completed"]}
+                            "search_pending": self.pending is not None, "search_completed": self.planning_metrics["search_completed"]}
         return action
 
 

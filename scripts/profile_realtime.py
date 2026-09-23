@@ -55,7 +55,7 @@ def collect_case(arguments: tuple) -> dict:
         for transition in trajectory.transitions:
             sample = transition.info["_policy"]
             output = policy.model(sample["graph"], sample["candidates"], sample["history"])
-            log_prob, _, _ = policy.model.statistics(output, sample["candidates"], sample["scope"], sample["selected"])
+            log_prob, _, _ = policy.model.statistics(output, sample["candidates"], sample["selected"])
             max_log_prob_error = max(max_log_prob_error, abs(float(log_prob) - sample["old_log_prob"]))
     if max_log_prob_error > 1e-5:
         raise AssertionError("stored candidate distribution does not reproduce the collection log probability")

@@ -9,9 +9,23 @@ from dfjsp_t_rl.policy import (
 )
 from dfjsp_t_rl.search import Candidate, CandidateSearch
 from dfjsp_t_rl.traffic import TrafficPlan
+from dfjsp_t_rl.trainer import ppo_loss
 
 
 class CandidateRankingTest(unittest.TestCase):
+    def test_scope_group_size_does_not_bias_action_probability_or_gradient(self) -> None:
+        policy = DFJSPTPolicyPlugin(hidden_dim=16)
+        logits = torch.nn.Parameter(torch.zeros(4))
+        candidates: dict = {"scopes": torch.tensor([0, 1, 1, 1])}
+        output: dict = {"plan_logits": logits, "value": torch.tensor(0.)}
+        old: torch.Tensor = torch.full((4,), -torch.log(torch.tensor(4.)).item())
+        probabilities = torch.stack([policy.model.statistics(output, candidates, i)[0] for i in range(4)])
+        torch.testing.assert_close(probabilities, old)
+        optimizer = torch.optim.SGD([logits], lr=.1)
+        ppo_loss(probabilities, old, torch.tensor([-1., 0., 0., 1.])).backward()
+        optimizer.step()
+        self.assertGreater(logits[3].item(), logits[0].item())
+
     def test_repeated_candidate_prefix_reuses_scores(self) -> None:
         policy: DFJSPTPolicyPlugin = DFJSPTPolicyPlugin(hidden_dim=128)
         with torch.no_grad():
@@ -41,7 +55,8 @@ class CandidateRankingTest(unittest.TestCase):
                 patch.object(CandidateSearch, "build_steps", repeated_prefix), \
                 patch.object(policy.proposal_model, "decode", wraps=policy.proposal_model.decode) as decode:
             list(policy._search_steps(scene, {}))
-        self.assertEqual(selected, [0, 0, 1, 1])
+        # Equal neural logits remain equal: no hidden cost prior overrides them.
+        self.assertEqual(selected, [0, 0, 0, 0])
         self.assertEqual(decode.call_count, 2)
         self.assertEqual([len(call.args[2]["scopes"]) for call in decode.call_args_list], [1, 1])
 

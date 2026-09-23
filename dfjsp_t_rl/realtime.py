@@ -7,6 +7,7 @@ import time
 
 from .search import Candidate, task_id
 from .traffic import TrafficPlan
+from experiment.algorithm_platform_plugins.dfjsp_t.buffer_safety import safe_dispatches
 
 
 @dataclass
@@ -77,7 +78,7 @@ def applicable(plan: Candidate, before: dict, now: dict) -> bool:
     for mid, keys in plan.queues.items():
         if set(map(tuple, keys)) != {tuple(key) for key in machines[mid]["input_queue"] if tuple(key) not in plan.cancel}:
             return False
-    return True
+    return safe_dispatches(now, plan.dispatch, plan.cancel)
 
 
 def materialize(plan: Candidate, scene: dict) -> None:

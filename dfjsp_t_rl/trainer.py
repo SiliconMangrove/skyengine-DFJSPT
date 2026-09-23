@@ -171,7 +171,7 @@ class CTDEPPOTrainer:
                             history = self.model.history_gru(encoded[position:position + 1], history)
                             output = self.model.decode({name: parts[position] for name, parts in node_parts.items()},
                                                        history.squeeze(0), candidates[position])
-                            lp, value, entropy = self.model.statistics(output, candidates[position], sample["scope"], sample["selected"])
+                            lp, value, entropy = self.model.statistics(output, candidates[position], sample["selected"])
                             log_probs.append(lp)
                             values_now.append(value)
                             entropies.append(entropy)

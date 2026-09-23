@@ -39,8 +39,10 @@ class RealtimeSafetyTest(unittest.TestCase):
 
     def test_stale_dispatch_is_not_committed_after_work_started(self):
         scene = {"jobs": [{"job_id": 0, "material_location": [0, 0], "carrier_id": None,
-                           "ops": [{"op_id": 0, "status": "PENDING", "assigned_machine": None}]}],
-                 "machines": [{"id": 0, "status": "OK", "current_op": None, "input_queue": []}],
+                           "ops": [{"op_id": 0, "status": "PENDING", "assigned_machine": None,
+                                    "machine_options_with_time": [(0, 10)]}]}],
+                 "machines": [{"id": 0, "status": "OK", "current_op": None, "input_queue": [],
+                               "location": [1, 1], "buffer_capacity": 1, "buffer_jobs": [], "suspended_ops": []}],
                  "agents": [], "tasks": []}
         plan = Candidate(0, dispatch={(0, 0): 0})
         self.assertTrue(applicable(plan, scene, scene))
@@ -49,6 +51,13 @@ class RealtimeSafetyTest(unittest.TestCase):
         self.assertFalse(applicable(plan, scene, current))
         current = deepcopy(scene)
         current["machines"][0]["status"] = "DOWN"
+        self.assertFalse(applicable(plan, scene, current))
+
+        # A still-unstarted plan also becomes invalid if another commitment
+        # consumed the destination capacity while its search was suspended.
+        current = deepcopy(scene)
+        current["jobs"].append({"job_id": 1, "ops": [], "material_location": [1, 1]})
+        current["machines"][0]["buffer_jobs"] = [1]
         self.assertFalse(applicable(plan, scene, current))
 
     def test_cached_move_cannot_bypass_handling_freeze(self):
