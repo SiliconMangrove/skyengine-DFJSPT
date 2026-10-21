@@ -35,7 +35,7 @@ bash install.sh
 bash start.sh
 ```
 
-Open the frontend URL printed by `start.sh` and choose **算法实验与优化平台** (Algorithm Experiment Platform). Select **DFJSP-T 图策略与滚动联合调度**, version **0.3.0**, then choose the training dataset and create a training run. CPU operation is supported; CUDA training requires a Docker-accessible NVIDIA GPU. For an initial run, use one sampling worker, CPU, a small episode count and a 5,000-step episode budget.
+Open the frontend URL printed by `start.sh` and choose **算法实验与优化平台** (Algorithm Experiment Platform). Select **DFJSP-T 图策略与滚动联合调度**, version **0.3.0**, then choose the training dataset and create a training run. The web platform's pipelined PPO trainer requires a Docker-accessible NVIDIA GPU. For an initial run, use one sampling worker, one validation worker, a small episode count and a 5,000-step episode budget. For CPU training, use the [headless command-line workflow](docs/USAGE.md#3-无界面训练).
 
 The companion repository includes separate synthetic training, validation and benchmark datasets. The platform provides model evaluation and factory replay after training. See [Usage](docs/USAGE.md) for dataset paths, training parameters, headless execution and checkpoint handling.
 

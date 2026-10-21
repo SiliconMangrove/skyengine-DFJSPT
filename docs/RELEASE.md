@@ -2,6 +2,8 @@
 
 Release date: 2026-10-21.
 
+Documentation correction (2026-10-21): the web platform's pipelined PPO trainer requires CUDA. CPU training uses the generic headless command-line trainer. The maintained README and usage guide clarify this distinction; the original v0.3.0 tag is unchanged.
+
 This release packages the CTDE-PPO controller from commit
 `6d1787c0b0ffa7be78e89134165366f796e5bbae`, paired with SkyEngine commit
 `800fc454dc29124e95e04e9abc58db3d87fd0383`.
