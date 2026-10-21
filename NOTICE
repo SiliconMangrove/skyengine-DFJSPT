@@ -1,0 +1,12 @@
+SkyEngine DFJSP-T
+Copyright 2026 SkyEngine DFJSP-T contributors
+
+This project is distributed under the Apache License, Version 2.0.
+
+The matching SkyEngine factory environment is a separate project:
+https://github.com/SiliconMangrove/skyengine
+Its source distribution includes its own Apache-2.0 license and third-party notices.
+
+NumPy, PyTorch and other runtime dependencies retain their respective licenses.
+The formal environment, PIBT implementation and synthetic datasets are obtained
+from the companion SkyEngine repository; they are not bundled in this repository.

@@ -1,12 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "skyengine-dfjspt"
 version = "0.3.0"
 description = "Pluggable DFJSP-T policies and trainers for SkyEngine"
-requires-python = ">=3.11,<3.13"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.11,<3.12"
 dependencies = [
-    "numpy>=1.24",
+    "numpy>=1.23.5,<2",
     "torch>=2.8",
 ]
 
 [project.entry-points."skyengine.algorithms"]
 ctde_ppo = "dfjsp_t_rl:register"
+
+[project.urls]
+Homepage = "https://github.com/SiliconMangrove/skyengine-DFJSPT"
+Issues = "https://github.com/SiliconMangrove/skyengine-DFJSPT/issues"
+
+[tool.setuptools.packages.find]
+include = ["dfjsp_t_rl*"]

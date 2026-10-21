@@ -1,22 +1,54 @@
-# DFJSP-T 图策略与滚动联合调度
+# SkyEngine DFJSP-T
 
-为 SkyEngine 提供联合调度策略、候选搜索、交通规划和 PPO 训练组件。
+[中文](README.zh-CN.md) · [Usage](docs/USAGE.md) · [Release notes](docs/RELEASE.md)
 
-- [训练使用说明](../skyengine/docs/联合调度训练使用说明.md)
-- [模块与参数](../docs/DFJSP-T算法仓库.md)
-- [算法结构](../docs/DFJSP-T联合调度算法结构.md)
-- [训练与数据生成](../docs/DFJSP-T训练平台与数据生成.md)
+Graph-based scheduling and PPO training for dynamic flexible job shops with transportation. The controller selects executable production and transport transactions; PIBT advances committed vehicle movements in the SkyEngine factory environment.
 
-控制器版本 0.3.0 使用第四版 checkpoint，默认每步 300ms 协作式推理预算。候选搜索可跨步推进，PIBT 每步执行已承诺运输；候选构造及提交都进行有限缓冲准入检查。神经网络直接对去重后的可执行事务建立一个分类分布，预测成本作为特征，不再用范围分组概率或固定成本偏置替代网络选择。旧模型需从头训练。
+## Features
 
-PPO 学习器将独立决策图合并编码，`graph_batch_size` 默认 16；循环历史仍按当前权重从头计算，片段内保留时间顺序和梯度。`input_cache_mb` 默认 256（MiB），限制本批输入张量缓存，0 关闭缓存；模型输出不跨优化器更新缓存。批量大小仅改变图编码执行方式，PPO 的 minibatch、epoch、样本顺序、GAE 和奖励保持原定义。批量浮点运算不保证与逐图计算逐位一致。
+- Joint machine selection, transport assignment and dispatch ordering.
+- Graph observations of jobs, machines, vehicles and roads, with recurrent policy history.
+- Rolling candidate search, buffer admission checks and persistent transport commitments.
+- PPO training with batched graph encoding, checkpoint saving and SkyEngine experiment monitoring.
+- Formal headless simulation and integration with SkyEngine's training, evaluation and replay interface.
 
-平台展示 epoch、小批进度、优化器更新次数和用时；日志在计算块边界按约 5 秒间隔刷新，首尾强制记录。更新 `skyengine-DFJSPT` 的同时需同步配套 `skyengine` 平台代码。0.3.0 修复与检查记录见 [2026-09-24 训练修复](../docs/训练平台与策略执行修复-20260924.md)。有限步更新检查不代表完整训练已收敛。
+## Supported version pair
 
-延迟检查（在 skyengine 根目录执行）：
+| Component | Version |
+| --- | --- |
+| This repository | `v0.3.0` — controller `ctde_ppo@0.3.0`, policy checkpoint schema 4 |
+| SkyEngine | [`800fc454dc29124e95e04e9abc58db3d87fd0383`](https://github.com/SiliconMangrove/skyengine/tree/800fc454dc29124e95e04e9abc58db3d87fd0383) |
+| Python | 3.11 |
 
-```powershell
-python ../skyengine-DFJSPT/scripts/profile_realtime.py --workers 4 --cases 4 --steps 100 --check-learning
+This package runs with the matching SkyEngine environment. Use the pinned pair for this release. The environment's `uv.lock` records the dependency versions.
+
+## Quick start: Linux / WSL2
+
+Install Git, Docker Engine with Compose, and start the Docker daemon. Run the following in a new directory; keep the two repositories as siblings.
+
+```bash
+git clone --branch v0.3.0 https://github.com/SiliconMangrove/skyengine-DFJSPT.git
+git clone https://github.com/SiliconMangrove/skyengine.git
+cd skyengine
+git checkout 800fc454dc29124e95e04e9abc58db3d87fd0383
+bash install.sh
+bash start.sh
 ```
 
-该命令使用训练集有限步采样，不代表完整训练效果验收。
+Open the frontend URL printed by `start.sh` and choose **算法实验与优化平台** (Algorithm Experiment Platform). Select **DFJSP-T 图策略与滚动联合调度**, version **0.3.0**, then choose the training dataset and create a training run. CPU operation is supported; CUDA training requires a Docker-accessible NVIDIA GPU. For an initial run, use one sampling worker, CPU, a small episode count and a 5,000-step episode budget.
+
+The companion repository includes separate synthetic training, validation and benchmark datasets. The platform provides model evaluation and factory replay after training. See [Usage](docs/USAGE.md) for dataset paths, training parameters, headless execution and checkpoint handling.
+
+## Repository layout
+
+```text
+dfjsp_t_rl/       policy, candidate search, routing, rewards and PPO learner
+configs/         headless training configurations
+scripts/         existing profiling utility
+tests/           algorithm regression tests
+docs/            installation, usage and release information
+```
+
+## License
+
+[Apache License 2.0](LICENSE). See [NOTICE](NOTICE) for project and dependency notices.
